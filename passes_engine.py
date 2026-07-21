@@ -53,14 +53,17 @@ except ImportError:
         }
 
 # ── Paths & eligibility ─────────────────────────────────────────────────────
-SEASON_ALL_CSV_PATH = Path(__file__).resolve().parent / "season_all_newserieb.csv"
-SEASON_ALL_BR_CSV_PATH = Path(__file__).resolve().parent / "season_all_br.csv"
-SEASON_ALL_BR_FULL_CSV_PATH = Path(__file__).resolve().parent / "season_all_brfull.csv"
-SEASON_ALL_PL_CSV_PATH = Path(__file__).resolve().parent / "season_all_PL.csv"
-SEASON_ALL_ITALIA_SERIEA_CSV_PATH = Path(__file__).resolve().parent / "season_all_italiaseriea.csv"
-SEASON_ALL_LALIGA_CSV_PATH = Path(__file__).resolve().parent / "season_all_laligapasses.csv"
-PLAYER_MATCH_STATS_PATH = Path(__file__).resolve().parent / "player_match_stats.csv"
-DATA_CACHE_VERSION = 64
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "data"
+SEASON_ALL_CSV_PATH = ROOT / "season_all_newserieb.csv"
+SEASON_ALL_BR_CSV_PATH = ROOT / "season_all_br.csv"
+SEASON_ALL_BR_FULL_CSV_PATH = ROOT / "season_all_brfull.csv"
+SEASON_ALL_PL_CSV_PATH = ROOT / "season_all_PL.csv"
+SEASON_ALL_ITALIA_SERIEA_CSV_PATH = ROOT / "season_all_italiaseriea.csv"
+SEASON_ALL_LALIGA_CSV_PATH = ROOT / "season_all_laligapasses.csv"
+PLAYER_MATCH_STATS_PATH = ROOT / "player_match_stats.csv"
+EUROPE_SEASON_PARQUET = DATA_DIR / "europe_season_passes.parquet"
+DATA_CACHE_VERSION = 65
 
 MIN_MINUTES_PCT = 0.30
 RATING_MIN_MINUTES_PCT = 0.30
@@ -800,8 +803,8 @@ def _load_laliga_pass_frame() -> pd.DataFrame:
     return resolve_positions_in_csv_frame(frame)
 
 
-def _load_season_pass_frame() -> pd.DataFrame:
-    """Primary pass pool: Premier League + La Liga + Serie A (Itália)."""
+def _load_european_pass_frames_from_csv() -> pd.DataFrame:
+    """Load and combine pass events from European top leagues (CSV source)."""
     frames: list[pd.DataFrame] = []
     for loader, league_source in (
         (_load_pl_pass_frame, "premier_league"),
@@ -817,6 +820,38 @@ def _load_season_pass_frame() -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+@functools.lru_cache(maxsize=1)
+def _load_season_pass_frame() -> pd.DataFrame:
+    """Primary pass pool: Premier League + La Liga + Serie A (Itália)."""
+    if EUROPE_SEASON_PARQUET.exists():
+        return pd.read_parquet(EUROPE_SEASON_PARQUET)
+    frame = _load_european_pass_frames_from_csv()
+    if frame.empty:
+        return frame
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(EUROPE_SEASON_PARQUET, index=False)
+    return frame
+
+
+@functools.lru_cache(maxsize=16)
+def _get_enriched_season_passes(
+    cache_version: int,
+    tier_model: str,
+    classification_model: str,
+    xt_surface_mode: str,
+) -> pd.DataFrame:
+    _ = cache_version
+    frame = _load_season_pass_frame()
+    if frame.empty:
+        return pd.DataFrame()
+    return _enrich_passes(
+        frame,
+        tier_model=normalize_tier_model(tier_model),
+        classification_model=normalize_classification_model(classification_model),
+        xt_surface_mode=normalize_xt_surface_mode(xt_surface_mode),
+    )
 
 
 def _br_position_group(raw: str | None) -> str | None:
@@ -2186,15 +2221,14 @@ def load_passes_grouped(
     tier_model = normalize_tier_model(tier_model)
     classification_model = normalize_classification_model(classification_model)
     xt_surface_mode = normalize_xt_surface_mode(xt_surface_mode)
-    frame = _load_season_pass_frame()
-    if frame.empty:
-        return {}
-    passes = _enrich_passes(
-        frame,
-        tier_model=tier_model,
-        classification_model=classification_model,
-        xt_surface_mode=xt_surface_mode,
+    passes = _get_enriched_season_passes(
+        cache_version,
+        tier_model,
+        classification_model,
+        xt_surface_mode,
     )
+    if passes.empty:
+        return {}
     return {str(pid): grp for pid, grp in passes.groupby("player_id", sort=False)}
 
 
@@ -2242,23 +2276,26 @@ def build_analytics(
         return [], []
 
     registry = build_player_registry(frame)
-    passes = _enrich_passes(
-        frame,
-        tier_model=tier_model,
-        classification_model=classification_model,
-        xt_surface_mode=xt_surface_mode,
+    passes = _get_enriched_season_passes(
+        cache_version,
+        tier_model,
+        classification_model,
+        xt_surface_mode,
     )
     minutes_info = _load_minutes_info(frame)
+    passes_by_player = {
+        str(pid): grp for pid, grp in passes.groupby("player_id", sort=False)
+    }
 
     players: list[dict] = []
     for player in registry:
         if not is_outfield_position(player.get("position")):
             continue
-        pid = player["code"]
+        pid = str(player["code"])
         mins = minutes_info.get(pid, {})
         pct = mins.get("minutes_pct")
-        grp = passes[passes["player_id"] == pid]
-        if grp.empty:
+        grp = passes_by_player.get(pid)
+        if grp is None or grp.empty:
             continue
         metrics = compute_player_metrics(grp, mins)
         players.append({

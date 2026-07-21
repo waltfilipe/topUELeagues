@@ -16,7 +16,7 @@ from sklearn.pipeline import Pipeline
 import passes_engine as pe
 import xp_study_engine as xse
 
-XP_DATA_CACHE_VERSION = 30
+XP_DATA_CACHE_VERSION = 31
 XP_POSITION_RANK_METRICS: tuple[str, ...] = (
     "xp_m4_total",
     "xp_m4_per_pass",
@@ -534,14 +534,17 @@ def build_xp_analytics(
 
     registry = pe.build_player_registry(frame)
     minutes_info = pe._load_minutes_info(frame)
+    season_by_player = {
+        str(pid): grp for pid, grp in season.groupby("player_id", sort=False)
+    }
     players: list[dict] = []
 
     for player in registry:
         if not pe.is_outfield_position(player.get("position")):
             continue
-        pid = player["code"]
-        grp = season[season["player_id"].astype(str) == str(pid)]
-        if grp.empty:
+        pid = str(player["code"])
+        grp = season_by_player.get(pid)
+        if grp is None or grp.empty:
             continue
         mins = minutes_info.get(pid, {})
         metrics = xstats.compute_extended_xp_stats(grp)
