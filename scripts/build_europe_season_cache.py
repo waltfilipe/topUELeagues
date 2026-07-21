@@ -31,6 +31,7 @@ def main() -> None:
 
     _, players = xe.build_xp_analytics()
     print(f"  players with xP metrics: {len(players)}")
+    print(f"  cached metrics parquet: {xe.XP_PLAYER_METRICS_PARQUET}")
     if players:
         top = players[0]
         print(f"  top xP: {top['player_name']} ({top['xp_m4_total']:.1f})")

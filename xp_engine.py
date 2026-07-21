@@ -16,7 +16,7 @@ from sklearn.pipeline import Pipeline
 import passes_engine as pe
 import xp_study_engine as xse
 
-XP_DATA_CACHE_VERSION = 33
+XP_DATA_CACHE_VERSION = 35
 XP_POSITION_RANK_METRICS: tuple[str, ...] = (
     "xp_m4_total",
     "xp_m4_per_pass",
@@ -59,6 +59,7 @@ DATA_DIR = ROOT / "data"
 RIDGE_MODEL_PATH = MODELS_DIR / "xp_expected_ridge.joblib"
 THREAT_THRESHOLDS_PATH = MODELS_DIR / "xp_threat_quantile.json"
 XP_PASSES_PARQUET = DATA_DIR / "xp_passes_europe.parquet"
+XP_PLAYER_METRICS_PARQUET = DATA_DIR / "xp_player_metrics.parquet"
 XP_META_PATH = DATA_DIR / "xp_season_meta.json"
 
 
@@ -480,6 +481,34 @@ def load_xp_passes_grouped(cache_version: int = XP_DATA_CACHE_VERSION) -> dict[s
     return {str(pid): grp for pid, grp in season.groupby("player_id", sort=False)}
 
 
+@functools.lru_cache(maxsize=64)
+def load_xp_passes_for_player(
+    player_id: str,
+    cache_version: int = XP_DATA_CACHE_VERSION,
+) -> pd.DataFrame:
+    """Load one player's scored xP passes without materializing the full grouped dict."""
+    _ = cache_version
+    if not XP_PASSES_PARQUET.exists():
+        return pd.DataFrame()
+    pid = str(player_id)
+    try:
+        import pyarrow.parquet as pq
+
+        for candidate in (pid, int(pid)):
+            try:
+                table = pq.read_table(XP_PASSES_PARQUET, filters=[("player_id", "==", candidate)])
+            except (TypeError, ValueError):
+                continue
+            if table.num_rows:
+                return table.to_pandas()
+    except Exception:
+        pass
+    season = load_season_passes()
+    if season.empty:
+        return pd.DataFrame()
+    return season[season["player_id"].astype(str) == pid].copy()
+
+
 def compute_player_xp_metrics(grp: pd.DataFrame) -> dict[str, float | int]:
     scored = grp[grp["is_won"] & grp["has_end"]]
     if scored.empty or XP_COL not in scored.columns:
@@ -521,12 +550,39 @@ def compute_player_xp_metrics(grp: pd.DataFrame) -> dict[str, float | int]:
     return out
 
 
+def _save_xp_player_metrics(players: list[dict]) -> None:
+    if not players:
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(players).to_parquet(XP_PLAYER_METRICS_PARQUET, index=False)
+    meta = season_meta() if XP_META_PATH.exists() else {}
+    meta["xp_metrics_cache_version"] = XP_DATA_CACHE_VERSION
+    with open(XP_META_PATH, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+
+
+def _load_cached_xp_players(cache_version: int) -> list[dict]:
+    if not XP_PLAYER_METRICS_PARQUET.exists() or not XP_META_PATH.exists():
+        return []
+    with open(XP_META_PATH, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    if int(meta.get("xp_metrics_cache_version", -1)) != int(cache_version):
+        return []
+    df = pd.read_parquet(XP_PLAYER_METRICS_PARQUET)
+    if df.empty:
+        return []
+    return df.to_dict(orient="records")
+
+
 def build_xp_analytics(
     cache_version: int = XP_DATA_CACHE_VERSION,
 ) -> tuple[list[dict], list[dict]]:
     import xp_stats_engine as xstats
 
-    _ = cache_version
+    cached_players = _load_cached_xp_players(cache_version)
+    if cached_players:
+        return [], cached_players
+
     season = load_season_passes()
     frame = pe._load_season_pass_frame()
     if season.empty or frame.empty:
@@ -572,6 +628,7 @@ def build_xp_analytics(
     xstats.attach_xp_pass_ratings(players)
     xstats.attach_all_stats_ranks(players)
     attach_xp_metric_ranks(players)
+    _save_xp_player_metrics(players)
     return registry, players
 
 

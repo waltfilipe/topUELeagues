@@ -4158,58 +4158,54 @@ def load_xp_analytics(_cache_version: int = XP_DATA_CACHE_VERSION):
     return xe.build_xp_analytics(_cache_version)
 
 
-@st.cache_data(show_spinner=False)
-def load_xp_passes(_cache_version: int = XP_DATA_CACHE_VERSION):
-    return xe.load_xp_passes_grouped(_cache_version)
-
-
-@st.cache_data(show_spinner=False)
-def load_ratings_bundle(
-    _pass_cache: int = DATA_CACHE_VERSION,
-    _carry_cache: int = CARRIES_DATA_CACHE_VERSION,
+@st.cache_data(show_spinner=False, max_entries=32)
+def get_player_enriched_passes(
+    player_id: str,
+    _cache_version: int = DATA_CACHE_VERSION,
 ):
-    """Compute pass, carry and progression ratings once per cache version."""
+    return pe.load_enriched_passes_for_player(
+        str(player_id),
+        cache_version=DATA_CACHE_VERSION,
+        tier_model=FIXED_TIER_MODEL,
+        classification_model=FIXED_CLASSIFICATION_MODEL,
+        xt_surface_mode=FIXED_XT_SURFACE_MODE,
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def get_player_xp_passes(
+    player_id: str,
+    _cache_version: int = XP_DATA_CACHE_VERSION,
+):
+    return xe.load_xp_passes_for_player(str(player_id), cache_version=XP_DATA_CACHE_VERSION)
+
+
+@st.cache_data(show_spinner=False)
+def load_app_bootstrap(
+    _pass_cache: int = DATA_CACHE_VERSION,
+    _xp_cache: int = XP_DATA_CACHE_VERSION,
+):
+    """Load player metrics and ratings without materializing full pass-level dicts."""
     _, all_players = load_analytics()
-    _, carries_players = load_carries_analytics()
-    passes_by_player = load_passes()
-    carries_by_player = load_carries_grouped()
-    all_players = mo.apply_midfield_position_groups(all_players, passes_by_player, carries_by_player)
-    carries_players = mo.apply_midfield_position_groups(carries_players, passes_by_player, carries_by_player)
     rated, players_by_id, pool_by_position = compute_pass_ratings(all_players)
-    carry_rated, carries_by_id, carries_pool_by_position = ce_compute_pass_ratings(carries_players)
     progression_rated, progression_by_id, progression_pool_by_position = pg_compute_progression_ratings(
         all_players,
-        carries_players,
+        [],
         pass_by_id=players_by_id,
-        carry_by_id=carries_by_id,
+        carry_by_id={},
     )
+    _, xp_players = load_xp_analytics(_xp_cache)
+    xp_by_id = {str(p["player_id"]): p for p in xp_players}
     return (
+        all_players,
         rated,
         players_by_id,
         pool_by_position,
-        carry_rated,
-        carries_by_id,
-        carries_pool_by_position,
-        progression_rated,
         progression_by_id,
         progression_pool_by_position,
+        xp_players,
+        xp_by_id,
     )
-
-
-@st.cache_data(show_spinner=False)
-def load_core_data(
-    _pass_cache: int = DATA_CACHE_VERSION,
-    _carry_cache: int = CARRIES_DATA_CACHE_VERSION,
-):
-    """Passes and carries event data used by dashboard maps."""
-    _, all_players = load_analytics()
-    _, carries_players = load_carries_analytics()
-    passes_by_player = load_passes()
-    carries_by_player = load_carries_grouped()
-    dribbles_by_player = load_dribbles_grouped()
-    all_players = mo.apply_midfield_position_groups(all_players, passes_by_player, carries_by_player)
-    carries_players = mo.apply_midfield_position_groups(carries_players, passes_by_player, carries_by_player)
-    return all_players, carries_players, passes_by_player, carries_by_player, dribbles_by_player
 
 
 def _norm(s: str) -> str:
@@ -7262,8 +7258,6 @@ def _prepare_sb_to_sa_similarity_context(
 def _render_player_analysis_similarity(
     target_id: str,
     *,
-    passes_by_player: dict,
-    carries_by_player: dict,
     carries_players_sb: list[dict],
     all_players: list[dict],
     pick_key: str = "pa_similar_pick",
@@ -7315,17 +7309,17 @@ def _render_player_analysis_similarity(
     )
     results = sim.attach_pass_origin_similarity(
         results,
-        passes_by_player.get(target_id),
+        get_player_enriched_passes(target_id),
         serie_a_passes,
-        target_carries=carries_by_player.get(target_id),
+        target_carries=None,
         carries_by_id=serie_a_carries,
     )
     _render_similarity_results_tab(
         results=results,
         target=target_player,
-        target_passes=passes_by_player.get(target_id),
+        target_passes=get_player_enriched_passes(target_id),
         pool_passes=serie_a_passes,
-        target_carries=carries_by_player.get(target_id),
+        target_carries=None,
         pool_carries=serie_a_carries,
         target_league="Ligas Europeias",
         similar_league="Serie A",
@@ -7863,7 +7857,6 @@ def render_stats_section(
 def render_maps_section(
     all_players: list[dict],
     progression_by_id: dict[str, dict],
-    xp_passes_by_player: dict,
     *,
     xp_by_id: dict[str, dict] | None = None,
 ) -> None:
@@ -7947,7 +7940,7 @@ def render_maps_section(
     map_category_label = xstats.maps_pass_type_label(map_filter_key)
 
     st.markdown('<div class="pa-maps-compact">', unsafe_allow_html=True)
-    raw_passes = xp_passes_by_player.get(str(player_id))
+    raw_passes = get_player_xp_passes(str(player_id))
     passes_df = xstats.filter_passes_for_map(raw_passes, map_filter_key)
     if passes_df is None or passes_df.empty:
         st.info("Nenhum passe completo para este jogador com o filtro selecionado.")
@@ -8284,15 +8277,10 @@ def render_estudo_section() -> None:
 
 def render_player_analysis_section(
     all_players: list[dict],
-    carries_players: list[dict],
-    passes_by_player: dict,
-    carries_by_player: dict,
     progression_by_id: dict[str, dict],
     pass_by_id: dict[str, dict],
-    carry_by_id: dict[str, dict],
     progression_pool_by_position: dict[str, list[dict]],
     pass_pool_by_position: dict[str, list[dict]],
-    carry_pool_by_position: dict[str, list[dict]],
     *,
     xp_by_id: dict[str, dict] | None = None,
 ) -> None:
@@ -8315,10 +8303,10 @@ def render_player_analysis_section(
         player_id,
         progression_by_id,
         pass_by_id,
-        carry_by_id,
+        {},
         progression_pool_by_position,
         pass_pool_by_position,
-        carry_pool_by_position,
+        {},
     )
     if player is None:
         st.warning("Could not build a rating profile for this player.")
@@ -8331,16 +8319,12 @@ def render_player_analysis_section(
     xp_profile = (xp_by_id or {}).get(str(player_id))
 
     origin_heatmap_b64: str | None = None
-    passes_df = passes_by_player.get(player_id)
-    carries_df = carries_by_player.get(player_id)
-    has_actions = (
-        (passes_df is not None and not passes_df.empty)
-        or (carries_df is not None and not carries_df.empty)
-    )
+    passes_df = get_player_enriched_passes(str(player_id))
+    has_actions = passes_df is not None and not passes_df.empty
     if has_actions:
         fig_origin = draw_action_origin_smooth_heatmap(
             passes_df,
-            carries_df,
+            None,
             str(player.get("player_name", "")),
             profile=True,
         )
@@ -8741,14 +8725,13 @@ def _render_pres_flow_steps() -> None:
 
 def render_presentation_tab(
     all_players: list[dict],
-    passes_by_player: dict,
     players_by_id: dict[str, dict],
     pool_by_position: dict[str, list[dict]],
     *,
     rated: list[dict],
     xp_players: list[dict] | None = None,
 ) -> None:
-    _ = (all_players, passes_by_player, players_by_id, pool_by_position, rated, xp_players)
+    _ = (all_players, players_by_id, pool_by_position, rated, xp_players)
 
     st.markdown(
         '<div class="pres-card pres-card-hero">'
@@ -9209,22 +9192,16 @@ def _render_similarity_results_tab(
 
 def main() -> None:
     with st.spinner("Loading data…"):
-        all_players, carries_players, passes_by_player, carries_by_player, _ = load_core_data()
         (
+            all_players,
             rated,
             players_by_id,
             pool_by_position,
-            carry_rated,
-            carries_by_id,
-            carries_pool_by_position,
-            progression_rated,
             progression_by_id,
             progression_pool_by_position,
-        ) = load_ratings_bundle()
-        with st.spinner("Loading xP season metrics…"):
-            _, xp_players = load_xp_analytics()
-            xp_passes_by_player = load_xp_passes()
-        xp_by_id = {str(p["player_id"]): p for p in xp_players}
+            xp_players,
+            xp_by_id,
+        ) = load_app_bootstrap()
 
     tab_pres, tab_analysis, tab_scatter, tab_maps = st.tabs(
         ["Overview", "Player Analysis", "Dispersão", "Maps"]
@@ -9232,7 +9209,6 @@ def main() -> None:
     with tab_pres:
         render_presentation_tab(
             all_players,
-            passes_by_player,
             players_by_id,
             pool_by_position,
             rated=rated,
@@ -9241,15 +9217,10 @@ def main() -> None:
     with tab_analysis:
         render_player_analysis_section(
             all_players,
-            carries_players,
-            passes_by_player,
-            carries_by_player,
             progression_by_id,
             players_by_id,
-            carries_by_id,
             progression_pool_by_position,
             pool_by_position,
-            carries_pool_by_position,
             xp_by_id=xp_by_id,
         )
     with tab_scatter:
@@ -9262,7 +9233,6 @@ def main() -> None:
         render_maps_section(
             all_players,
             progression_by_id,
-            xp_passes_by_player,
             xp_by_id=xp_by_id,
         )
 

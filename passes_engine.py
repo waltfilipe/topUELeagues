@@ -15,6 +15,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import heuristic_xt_v4 as hx4
+import midfield_origin as mo
 from comparison_config import (
     CLASSIFICATION_MODEL_DEFAULT,
     CLASSIFICATION_MODEL_OPT1_SHORT_FT,
@@ -63,7 +64,7 @@ SEASON_ALL_ITALIA_SERIEA_CSV_PATH = ROOT / "season_all_italiaseriea.csv"
 SEASON_ALL_LALIGA_CSV_PATH = ROOT / "season_all_laligapasses.csv"
 PLAYER_MATCH_STATS_PATH = ROOT / "player_match_stats.csv"
 EUROPE_SEASON_PARQUET = DATA_DIR / "europe_season_passes.parquet"
-DATA_CACHE_VERSION = 65
+DATA_CACHE_VERSION = 66
 
 MIN_MINUTES_PCT = 0.30
 RATING_MIN_MINUTES_PCT = 0.30
@@ -2256,6 +2257,25 @@ def load_serie_a_passes_grouped(
     return {str(pid): grp for pid, grp in passes.groupby("player_id", sort=False)}
 
 
+def load_enriched_passes_for_player(
+    player_id: str,
+    cache_version: int = DATA_CACHE_VERSION,
+    tier_model: str = TIER_MODEL_DEFAULT,
+    classification_model: str = CLASSIFICATION_MODEL_DEFAULT,
+    xt_surface_mode: str = XT_SURFACE_MODE_DEFAULT,
+) -> pd.DataFrame:
+    """Enriched completed passes for one player (memory-light alternative to grouped dict)."""
+    passes = _get_enriched_season_passes(
+        cache_version,
+        normalize_tier_model(tier_model),
+        normalize_classification_model(classification_model),
+        normalize_xt_surface_mode(xt_surface_mode),
+    )
+    if passes.empty:
+        return pd.DataFrame()
+    return passes[passes["player_id"].astype(str) == str(player_id)].copy()
+
+
 def build_analytics(
     cache_version: int = DATA_CACHE_VERSION,
     tier_model: str = TIER_MODEL_DEFAULT,
@@ -2298,11 +2318,23 @@ def build_analytics(
         if grp is None or grp.empty:
             continue
         metrics = compute_player_metrics(grp, mins)
+        position = player.get("position", "—")
+        position_group = rating_position_group(position)
+        if mo.is_midfield_position_code(position):
+            origin_pct = mo.offensive_origin_pct_from_passes_df(grp)
+            if origin_pct is not None:
+                position_group = (
+                    mo.ATTACKING_MIDFIELD_GROUP
+                    if origin_pct >= mo.OFFENSIVE_ORIGIN_THRESHOLD
+                    else mo.CENTRAL_MIDFIELD_GROUP
+                )
+            else:
+                position_group = mo.default_midfield_group(position)
         players.append({
             "player_id": pid,
             "player_name": player["name"],
-            "position": player.get("position", "—"),
-            "position_group": rating_position_group(player.get("position")),
+            "position": position,
+            "position_group": position_group,
             "team": mins.get("team", "—"),
             "minutes": mins.get("minutes"),
             "minutes_pct": pct,

@@ -81,6 +81,17 @@ def offensive_origin_pct(
     return float((arr >= MIDLINE_X).mean() * 100.0)
 
 
+def offensive_origin_pct_from_passes_df(passes: pd.DataFrame | None) -> float | None:
+    """Share of pass origins in the opponent's half from one player's pass frame."""
+    from passes_engine import filter_live_ball_passes
+
+    xs = _action_start_x_values(filter_live_ball_passes(passes), None)
+    if len(xs) < MIN_ACTIONS_FOR_ORIGIN_SPLIT:
+        return None
+    arr = np.asarray(xs, dtype=float)
+    return float((arr >= MIDLINE_X).mean() * 100.0)
+
+
 def resolve_midfield_position_group(
     player: dict,
     passes_by_id: dict[str, pd.DataFrame],

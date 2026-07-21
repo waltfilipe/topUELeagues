@@ -4,5 +4,6 @@
   "completed": 816859,
   "threats": 73412,
   "players": 1685,
-  "matches": 1138
+  "matches": 1138,
+  "xp_metrics_cache_version": 35
 }
