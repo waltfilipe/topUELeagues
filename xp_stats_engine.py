@@ -28,6 +28,8 @@ CROSS_DIST_MIN_M = 15.0
 CROSS_LATERAL_DELTA_MIN_M = 8.0
 CROSS_MAX_START_X = 102.0
 FROM_DEEP_DIST_MIN_M = 15.0
+DIAGONAL_LONG_MIN_ABS_DY_M = 18.0
+DIAGONAL_LONG_MIN_LATERAL_RATIO = 0.45
 PENALTY_X_MIN = pe.PENALTY_BOX_X_MIN
 PENALTY_Y_MIN = pe.PENALTY_BOX_Y_MIN
 PENALTY_Y_MAX = pe.PENALTY_BOX_Y_MAX
@@ -270,6 +272,8 @@ def compute_special_pass_masks(scored: pd.DataFrame) -> dict[str, np.ndarray]:
     lateral_start = _is_lateral_corridor(y_start)
     lateral_end = _is_lateral_corridor(y_end)
     in_box = _in_penalty_box(x_end, y_end)
+    abs_dy = np.abs(dy)
+    lateral_ratio = abs_dy / np.clip(dist, 0.1, None)
 
     return {
         "progressive": pe._progressive_wyscout_vec(x_start, y_start, x_end, y_end),
@@ -279,6 +283,8 @@ def compute_special_pass_masks(scored: pd.DataFrame) -> dict[str, np.ndarray]:
             & (x_end >= FINAL_X_MIN)
             & lateral_end
             & _is_diagonal_long_pass(y_start, y_end)
+            & (abs_dy >= DIAGONAL_LONG_MIN_ABS_DY_M)
+            & (lateral_ratio >= DIAGONAL_LONG_MIN_LATERAL_RATIO)
         ),
         "line_break": (
             _line_break_origin_corridor(y_start)
